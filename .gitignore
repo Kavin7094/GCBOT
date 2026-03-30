@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+
+# Model weights (large file — host separately if needed)
+Trash_detection_Yolov10_StreamLit/best.pt
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Videos
+*.mp4
+
+# WhatsApp media (already referenced in README)
+WhatsApp Video*
