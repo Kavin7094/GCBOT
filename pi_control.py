@@ -88,9 +88,9 @@ def serial_reader():
                     pass
                 broadcast(line)   # e.g. "SCORE:10"
 
-            # Weight debug reading (sent on WEIGHTNOW or forced check)
+            # Weight reading — forward to laptop so it can compute combined score
             elif line.startswith("W:"):
-                pass   # just logged via print above; Pi doesn't re-score
+                broadcast(line)   # e.g. "W:23.45"
 
             # else: other debug lines from Arduino — logged above, ignored here
 

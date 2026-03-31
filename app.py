@@ -30,6 +30,35 @@ yolo_model = YOLO(_MODEL_PATH)   # loaded once at startup; thread-safe for infer
 INFER_SIZE = 416
 
 # ═══════════════════════════════════════════════════════════
+#  SCORING SYSTEM
+# ═══════════════════════════════════════════════════════════
+# Base points per detected trash class (TACO dataset labels)
+SCORE_MAP = {
+    "Broken glass":          15,   # dangerous — bonus reward
+    "Bottle":                10,   # recyclable
+    "Can":                   10,   # recyclable
+    "Plastic bag - wrapper": 10,   # high environmental impact
+    "Carton":                 8,   # recyclable
+    "Cup":                    8,   # disposable
+    "Plastic container":      8,   # recyclable
+    "Styrofoam piece":        8,   # hard to recycle
+    "Other plastic":          7,
+    "Aluminium foil":         5,   # recyclable
+    "Paper":                  5,   # recyclable
+    "Other litter":           5,
+    "Straw":                  5,   # environmental hazard
+    "Cigarette":              3,   # small but toxic
+    "Lid":                    3,
+    "Bottle cap":             3,
+    "Pop tab":                3,
+    "Unlabeled litter":       2,
+}
+
+# Weight scoring constants
+W_REF       = 100.0   # grams — at W_REF the multiplier doubles the base score
+MIN_WEIGHT  =   5.0   # grams — below this, treat as no object (noise rejection)
+
+# ═══════════════════════════════════════════════════════════
 #  GLOBALS
 # ═══════════════════════════════════════════════════════════
 app = Flask(__name__)
@@ -39,15 +68,61 @@ detected_frame = None
 running        = True
 latest_score   = 0
 
+# Last detection snapshot (updated every inference frame)
+last_detected_class = None   # e.g. "Bottle"
+last_detected_conf  = 0.0    # e.g. 0.87
+
+# Set True when WEIGHTNOW is sent; cleared once W: reply arrives
+weighnow_pending = False
+# Info about the last scored event (for the UI)
+last_score_event = {"pts": 0, "cls": "-", "weight": 0.0, "base": 0, "mult": 1.0}
+
 pi_lock = threading.Lock()
 pi_sock = None
 
 # ═══════════════════════════════════════════════════════════
 #  PI CONNECTION (control channel)
 # ═══════════════════════════════════════════════════════════
+def compute_combined_score(weight_g: float) -> dict:
+    """
+    Formula:  final = round(base × (1 + weight_g / W_REF))
+
+    If no object was detected → weight-only fallback:
+      base = max(1, round(weight_g / 10))   (1 pt per 10 g)
+
+    Returns dict: {pts, cls, weight, base, mult}
+    """
+    global latest_score, last_score_event
+
+    cls  = last_detected_class
+    conf = last_detected_conf
+
+    if cls and cls in SCORE_MAP:
+        base = SCORE_MAP[cls]
+    elif cls:
+        base = 5                       # detected but class not in map
+    else:
+        # No detection — weight-only
+        cls  = "(weight only — no detection)"
+        conf = 0.0
+        base = max(1, round(weight_g / 10))
+
+    mult  = round(1.0 + weight_g / W_REF, 2)
+    pts   = round(base * mult)
+    latest_score += pts
+
+    event = {"pts": pts, "cls": cls, "weight": round(weight_g, 1),
+             "base": base, "mult": mult, "conf": round(conf, 2),
+             "total": latest_score}
+    last_score_event = event
+    print(f"[SCORE] +{pts} pts | {cls} (conf={conf:.2f}) | {weight_g:.1f}g "
+          f"| base={base} × {mult:.2f} → total={latest_score}")
+    return event
+
+
 def pi_reader(sock):
-    """Read lines sent by the Pi (e.g. SCORE:N) and update state."""
-    global latest_score
+    """Read lines sent by the Pi and update state."""
+    global weighnow_pending, latest_score
     buf = b""
     try:
         while True:
@@ -58,12 +133,27 @@ def pi_reader(sock):
             while b"\n" in buf:
                 line, buf = buf.split(b"\n", 1)
                 msg = line.decode(errors="ignore").strip()
+
                 if msg.startswith("SCORE:"):
+                    # Legacy path — keep for backwards-compat
                     try:
-                        latest_score = int(msg.split(":", 1)[1])
-                        print(f"[SCORE] {latest_score}")
+                        latest_score = int(msg.split(":", 1)[1])  # noqa: F811
+                        print(f"[SCORE-legacy] {latest_score}")
                     except ValueError:
                         pass
+
+                elif msg.startswith("W:"):
+                    raw = msg[2:]   # strip "W:"
+                    try:
+                        diff_g = float(raw)
+                        if weighnow_pending and diff_g >= MIN_WEIGHT:
+                            weighnow_pending = False
+                            compute_combined_score(diff_g)
+                        elif weighnow_pending:
+                            weighnow_pending = False
+                            print(f"[SCORE] Skipped — weight {diff_g:.1f}g < MIN ({MIN_WEIGHT}g)")
+                    except ValueError:
+                        pass   # debug strings like ERR, baseline_reset, etc.
     except Exception as e:
         print(f"[READER] {e}")
 
@@ -173,7 +263,7 @@ def inference_loop():
       • Skip inference when the frame hasn't changed (avoids duplicate work)
       • torch thread count capped at startup to stop CPU over-subscription
     """
-    global detected_frame
+    global detected_frame, last_detected_class, last_detected_conf
     last_hash = None
 
     while running:
@@ -183,22 +273,32 @@ def inference_loop():
             continue
 
         # ── Skip if frame hasn't changed since last inference
-        fhash = id(frame)          # CPython object id changes when latest_frame is reassigned
+        fhash = id(frame)
         if fhash == last_hash:
             time.sleep(0.02)
             continue
         last_hash = fhash
 
-        # ── Resize to inference resolution (keeps aspect ratio via letterbox inside YOLO)
+        # ── Resize to inference resolution
         small = cv2.resize(frame, (INFER_SIZE, INFER_SIZE),
                            interpolation=cv2.INTER_LINEAR)
 
         try:
             results = yolo_model(small, imgsz=INFER_SIZE, conf=0.25, verbose=False)
-            # plot() returns annotated BGR frame at INFER_SIZE; scale back up to original
             annotated = results[0].plot()
             detected_frame = cv2.resize(annotated, (frame.shape[1], frame.shape[0]),
                                         interpolation=cv2.INTER_LINEAR)
+
+            # ── Track highest-confidence detection for scoring
+            boxes = results[0].boxes
+            if boxes is not None and len(boxes) > 0:
+                best_idx  = int(boxes.conf.argmax())
+                best_cls  = results[0].names[int(boxes.cls[best_idx])]
+                best_conf = float(boxes.conf[best_idx])
+                last_detected_class = best_cls
+                last_detected_conf  = best_conf
+            # Note: we do NOT clear last_detected_class when nothing is detected
+            # so the last seen object is still used when DROP is pressed
         except Exception as e:
             print(f"[INFER] {e}")
 
@@ -248,15 +348,24 @@ def video_feed_detected():
 
 @app.route("/cmd", methods=["POST"])
 def cmd():
+    global weighnow_pending
     data = request.get_json(silent=True)
     if not data or "cmd" not in data:
         return jsonify(ok=False, error="no cmd"), 400
-    ok, info = send_to_pi(str(data["cmd"]).strip())
+    command = str(data["cmd"]).strip()
+    if command == "WEIGHTNOW":
+        weighnow_pending = True   # arm the weight-triggered scorer
+    ok, info = send_to_pi(command)
     return jsonify(ok=ok, info=info)
 
 @app.route("/score")
 def score():
-    return jsonify(score=latest_score)
+    return jsonify(score=latest_score, event=last_score_event)
+
+@app.route("/scorechart")
+def scorechart():
+    rows = [(cls, pts) for cls, pts in sorted(SCORE_MAP.items(), key=lambda x: -x[1])]
+    return jsonify(chart=rows, W_REF=W_REF, MIN_WEIGHT=MIN_WEIGHT)
 
 # ═══════════════════════════════════════════════════════════
 #  FRONTEND
@@ -974,11 +1083,29 @@ document.getElementById('btnDropObj').addEventListener('click', () => {
   // 3. After 2s, send weight-check trigger
   setTimeout(() => {
     sendCmd('WEIGHTNOW');
-    btn.textContent = '✅ Weight checked';
-    setTimeout(() => {
-      btn.classList.remove('busy');
-      btn.innerHTML = '🗑️ DROP OBJECT';
-    }, 1200);
+    btn.textContent = '⚖️ Weighing…';
+
+    // 4. Poll for score update (up to 5s)
+    const startScore = _lastScore;
+    let checks = 0;
+    const checker = setInterval(() => {
+      checks++;
+      fetch('/score').then(r => r.json()).then(d => {
+        if (d.score !== startScore) {
+          clearInterval(checker);
+          _lastScore = d.score;
+          const ev = d.event;
+          const el = document.getElementById('scoreVal');
+          if (el) { el.textContent = d.score; el.classList.add('bump'); setTimeout(() => el.classList.remove('bump'), 300); }
+          btn.textContent = `+${ev.pts} ${ev.cls} (${ev.weight}g)`;
+          setTimeout(() => { btn.classList.remove('busy'); btn.innerHTML = '🗑️ DROP OBJECT'; }, 2500);
+        } else if (checks >= 10) {
+          clearInterval(checker);
+          btn.textContent = 'No score (too light?)';
+          setTimeout(() => { btn.classList.remove('busy'); btn.innerHTML = '🗑️ DROP OBJECT'; }, 1500);
+        }
+      }).catch(() => {});
+    }, 500);
   }, 2000);
 });
 

@@ -2,7 +2,7 @@
 
 # 🤖 GCBOT — Gamified Cleaning Bot
 
-**An AI-powered autonomous trash-collecting robot with real-time web control, live video streaming, and YOLOv10 waste detection.**
+**An AI-powered autonomous trash-collecting robot with real-time web control, live video streaming, YOLOv10 waste detection, and a combined AI + weight-based scoring system.**
 
 [![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
 [![Flask](https://img.shields.io/badge/Flask-2.x-000000?style=for-the-badge&logo=flask&logoColor=white)](https://flask.palletsprojects.com)
@@ -42,10 +42,11 @@
 - 🦾 **A servo-powered arm & gripper** for picking up trash
 - 📷 **A live camera stream** from an onboard Raspberry Pi
 - 🧠 **YOLOv10 AI** running real-time trash detection on the laptop
-- ⚖️ **A load-cell scoring system** to auto-score collected trash
+- 🏆 **Combined AI + Weight scoring** — points are based on both what the AI detected AND how heavy the object is
+- ⚖️ **HX711 load cell** measures object weight for score multiplier
 - 🌐 **A browser-based control panel** accessible from any device on the network
 
-The entire system communicates over TCP sockets — the laptop runs the Flask web server and AI inference, the Raspberry Pi acts as a bridge between the laptop and the Arduino, and the Arduino directly controls all motors and servos.
+The entire system communicates over TCP sockets — the laptop runs the Flask web server, AI inference, and score computation; the Raspberry Pi acts as a bridge between the laptop and the Arduino; and the Arduino directly controls all motors, servos, and the load cell.
 
 ---
 
@@ -110,15 +111,20 @@ sequenceDiagram
 
     Browser->>Laptop: HTTP GET /video_feed
     Pi-->>Laptop: TCP Video Frame (Port 9999)
-    Laptop-->>Laptop: YOLOv10 Inference
+    Laptop-->>Laptop: YOLOv10 Inference → tracks last_detected_class
     Laptop-->>Browser: MJPEG Stream
 
-    Browser->>Laptop: POST /cmd {"cmd": "DROP_SCORE"}
-    Laptop->>Pi: TCP "G50\n" + "WEIGHTNOW\n"
+    Note over Browser,Arduino: DROP OBJECT Flow (AI + Weight Scoring)
+    Browser->>Laptop: POST /cmd {"cmd": "WEIGHTNOW"}
+    Laptop->>Laptop: weighnow_pending = True
+    Laptop->>Pi: TCP "WEIGHTNOW\n"
     Pi->>Arduino: Serial "WEIGHTNOW\n"
-    Arduino-->>Pi: Serial "SCORE:10\n"
-    Pi-->>Laptop: TCP "SCORE:10\n"
-    Laptop-->>Browser: JSON {score: 10}
+    Arduino-->>Arduino: HX711 read → diff = current - lastWeight
+    Arduino-->>Pi: Serial "W:23.45\n"
+    Pi-->>Laptop: TCP "W:23.45\n" (broadcast)
+    Laptop-->>Laptop: compute_combined_score(23.45g)
+    Note over Laptop: score = round(base × (1 + 23.45/100))
+    Laptop-->>Browser: JSON {score: 12, event: {cls: "Bottle", pts: 12, weight: 23.5}}
 ```
 
 ---
@@ -130,10 +136,11 @@ sequenceDiagram
 | 🎮 **WASD / D-pad Control** | Move forward, backward, left, right with keyboard or touch |
 | 🦾 **Arm Lift Control** | Dual servo arm with animated angle ring indicator |
 | 🤏 **Gripper Control** | Dual servo gripper (open/close) with visual feedback |
-| 🗑️ **Drop Object** | One-tap: releases gripper → triggers weight check → auto-scores |
+| 🗑️ **Drop Object** | One-tap: releases gripper → waits 2s → weighs → combines AI class + weight → scores |
 | 📷 **Live Camera Feed** | MJPEG stream from Pi camera at ~30 FPS |
 | 🤖 **AI Detection Feed** | YOLOv10 trash overlay feed (host only) with toggle |
-| ⚖️ **Auto Scoring** | HX711 load cell detects collected trash weight, score broadcasts to all clients |
+| 🏆 **AI + Weight Scoring** | Score = `base_pts × (1 + weight_g / 100)` — heavier + rarer = more points |
+| ⚖️ **Load Cell Integration** | HX711 reads weight diff on command, laptop combines with AI class |
 | 📱 **Mobile Responsive** | Landscape-optimized with portrait rotation hint |
 | ⚡ **Low Latency** | TCP_NODELAY + no blocking delays = near-zero command lag |
 | 🔄 **Auto-Reconnect** | All TCP connections auto-reconnect on drop |
@@ -251,11 +258,11 @@ The onboard AI model is a **custom-trained YOLOv10** fine-tuned on a multi-class
 ```
 GCBOT/
 │
-├── app.py                              # 💻 Laptop: Flask server, YOLOv10 inference, video stream
+├── app.py                              # 💻 Laptop: Flask server, YOLOv10 inference, AI+weight scoring
 ├── pi_control.py                       # 🍓 Raspberry Pi: TCP server + Serial relay to Arduino
 │
 ├── gcbot_arduino/
-│   └── gcbot_arduino.ino              # ⚡ Arduino: motors, servos, load cell, scoring
+│   └── gcbot_arduino.ino              # ⚡ Arduino: motors, servos, load cell (weight only)
 │
 ├── Trash_detection_Yolov10_StreamLit/
 │   ├── best.pt                        # 🧠 Trained YOLOv10 model weights
@@ -274,6 +281,7 @@ GCBOT/
 │   ├── train_yolov10_garbage_detection.ipynb  # 📓 Training notebook
 │   └── requirements.txt
 │
+├── .gitignore
 ├── Screenshot 2026-03-26 213021.png   # 🖼️ Desktop UI screenshot
 ├── WhatsApp Image 2026-03-17 *.jpeg   # 🖼️ Hardware & mobile UI photos
 └── README.md
@@ -404,36 +412,80 @@ Commands are sent as **newline-terminated ASCII strings** over TCP:
 | `/cmd` | POST | Send a command to the robot |
 | `/video_feed` | GET | Raw MJPEG camera stream |
 | `/video_feed_detected` | GET | YOLOv10 annotated MJPEG stream |
-| `/score` | GET | Get current score as JSON |
+| `/score` | GET | Current score + last scoring event breakdown |
+| `/scorechart` | GET | Full score classification chart as JSON |
 
 **Example cURL:**
 
 ```bash
+# Send a movement command
 curl -X POST http://localhost:5001/cmd \
      -H "Content-Type: application/json" \
      -d '{"cmd": "F"}'
+
+# Get the score chart
+curl http://localhost:5001/scorechart
 ```
 
 ---
 
 ## 🏆 Scoring System
 
-The scoring is fully **Arduino-side computed** and triggered only by explicit commands (not automatic polling):
+Scoring uses a **combined AI detection + weight measurement** system. The laptop computes the final score using both what the AI sees and how heavy the object is.
+
+### Formula
+
+```
+final_score = round(base_score × (1 + weight_g / 100))
+```
+
+- **`base_score`** — determined by the detected trash class (see chart below)
+- **`weight_g`** — weight difference measured by the HX711 load cell (in grams)
+- **No detection fallback** — if no trash was detected by AI: `base = max(1, weight_g ÷ 10)`
+
+### Score Classification Chart
+
+| Object Class | Base Points | @ 50g | @ 100g | @ 200g | Reason |
+|---|---|---|---|---|---|
+| Broken glass | 15 | 22 | 30 | 45 | Dangerous — bonus reward |
+| Bottle | 10 | 15 | 20 | 30 | Recyclable |
+| Can | 10 | 15 | 20 | 30 | Recyclable |
+| Plastic bag / wrapper | 10 | 15 | 20 | 30 | High environmental impact |
+| Carton | 8 | 12 | 16 | 24 | Recyclable |
+| Cup | 8 | 12 | 16 | 24 | Disposable |
+| Plastic container | 8 | 12 | 16 | 24 | Recyclable |
+| Styrofoam piece | 8 | 12 | 16 | 24 | Hard to recycle |
+| Other plastic | 7 | 10 | 14 | 21 | — |
+| Aluminium foil | 5 | 7 | 10 | 15 | Recyclable |
+| Paper | 5 | 7 | 10 | 15 | Recyclable |
+| Straw | 5 | 7 | 10 | 15 | Environmental hazard |
+| Other litter | 5 | 7 | 10 | 15 | — |
+| Cigarette | 3 | 4 | 6 | 9 | Small but toxic |
+| Lid | 3 | 4 | 6 | 9 | Small |
+| Bottle cap | 3 | 4 | 6 | 9 | Small |
+| Pop tab | 3 | 4 | 6 | 9 | Small |
+| Unlabeled litter | 2 | 3 | 4 | 6 | Unknown fallback |
+| **(No detection)** | weight÷10 | 5 | 10 | 20 | Weight-only fallback |
+
+### Scoring Flow
 
 ```
 1. User presses 🗑️ DROP OBJECT button in the browser
-2. Flask sends: G50 (open gripper to 50°)
-3. After 800ms delay: Flask sends WEIGHTNOW
+2. Gripper opens to 50° (releases trash)
+3. After 2s delay, WEIGHTNOW command sent
 4. Arduino reads HX711 load cell (avg 3 readings)
-5. if (current_weight - last_weight) > 20g:
-       score += 10
-       Arduino sends "SCORE:10\n"
-6. Pi forwards SCORE:10 to all connected laptops
-7. Flask broadcasts score via /score endpoint
-8. Browser updates the score badge with animation
+5. Arduino sends weight diff: "W:23.45\n"
+6. Pi broadcasts W:23.45 to all connected laptops
+7. Laptop's app.py combines:
+   • last_detected_class (from YOLO inference) → base = 10 (Bottle)
+   • weight_g = 23.45g → multiplier = 1.23
+   • final_score = round(10 × 1.23) = 12 pts
+8. Browser shows: "+12 Bottle (23.5g)" and updates the score badge
 ```
 
-> The 3-second cooldown between scores prevents accidental double-counting due to weight oscillation.
+> 💡 **Tip:** The weight multiplier means heavier objects of the same class score higher. A full 200g bottle scores 30 pts vs. a small 50g bottle at 15 pts.
+
+> ⚖️ **No detection fallback:** If the AI didn't detect the object before drop, scoring falls back to weight-only: 1 point per 10 grams.
 
 ---
 

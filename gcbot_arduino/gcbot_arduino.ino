@@ -18,16 +18,10 @@ Servo grabA, grabB;
 #define SCK A0
 HX711 scale;
 
-/* ---------------- SCORE SYSTEM ---------------- */
+/* ---------------- WEIGHT ---------------- */
 // Weight is ONLY read when the WEIGHTNOW command is received.
-// Nothing is sent automatically.
+// Score is computed on the laptop (AI detection + weight combined).
 float lastWeight = 0;
-int   score      = 0;
-
-const float         WEIGHT_THRESH  = 20.0;  // grams diff to count as new trash
-const unsigned long SCORE_COOLDOWN = 3000;  // ms — ignore rapid spikes
-
-unsigned long lastScoreTime = 0;
 
 /* ---------------- SERIAL BUFFER ---------------- */
 String command = "";
@@ -69,7 +63,6 @@ void setup() {
   }
 
   Serial.println("SYSTEM READY");
-  Serial.print("SCORE:"); Serial.println(score);
 }
 
 /* ---------------- SERVO FUNCTIONS ---------------- */
@@ -94,37 +87,22 @@ void stopMotors(){ digitalWrite(IN1,LOW); digitalWrite(IN2,LOW);  digitalWrite(I
 
 /* ---------------- WEIGHT CHECK (command-triggered only) ---------------- */
 // Called ONLY when WEIGHTNOW is received from the Pi.
+// Sends W:<diff_grams> — laptop combines with AI detection for scoring.
 void doWeightCheck() {
   if (!scale.is_ready()) {
-    Serial.println("W:ERR_NOT_READY");
+    Serial.println("W:ERR");
     return;
   }
 
-  float current = scale.get_units(3);  // average 3 readings for accuracy
+  float current = scale.get_units(3);   // average 3 readings
+  float diff    = current - lastWeight;  // positive = object added
 
-  // Always report the raw reading so the Pi/user can see it
-  Serial.print("W:"); Serial.println(current, 2);
+  // Send the diff — laptop combines this with last detected class
+  Serial.print("W:"); Serial.println(diff, 2);
 
-  float diff = current - lastWeight;
-  Serial.print("W:diff "); Serial.println(diff, 2);   // debug: see the diff
-
-  if (diff > WEIGHT_THRESH) {
-    unsigned long now = millis();
-    unsigned long elapsed = now - lastScoreTime;
-    if (elapsed >= SCORE_COOLDOWN) {
-      score += 10;
-      lastScoreTime = now;
-      lastWeight    = current;
-      Serial.print("SCORE:"); Serial.println(score);  // Pi forwards this
-    } else {
-      // Debug: tells you cooldown is blocking the score
-      Serial.print("W:cooldown_remaining "); Serial.println(SCORE_COOLDOWN - elapsed);
-    }
-  } else if (diff < -5.0) {
-    lastWeight = current;   // weight dropped — reset baseline
-    Serial.println("W:baseline_reset");
-  } else {
-    Serial.println("W:below_threshold");  // diff too small — no score
+  // Update baseline for next reading
+  if (abs(diff) > 5.0) {
+    lastWeight = current;
   }
 }
 
