@@ -9,7 +9,7 @@
 [![Arduino](https://img.shields.io/badge/Arduino-Uno-00979D?style=for-the-badge&logo=arduino&logoColor=white)](https://arduino.cc)
 [![YOLOv10](https://img.shields.io/badge/YOLOv10-Ultralytics-FF6600?style=for-the-badge&logo=yolo&logoColor=white)](https://ultralytics.com)
 [![Raspberry Pi](https://img.shields.io/badge/Raspberry_Pi-4-C51A4A?style=for-the-badge&logo=raspberrypi&logoColor=white)](https://raspberrypi.org)
-[![License](https://img.shields.io/badge/License-Kavin%20and%20Team-blueviolet?style=for-the-badge)](#-license)
+[![License: MIT](https://img.shields.io/badge/License-MIT-22c55e?style=for-the-badge)](LICENSE)
 
 </div>
 
@@ -519,15 +519,30 @@ Contributions, issues, and feature requests are welcome!
 
 ## 📄 License
 
+This project is open source and available under the **[MIT License](LICENSE)**.
+
 ```
-Copyright © 2026 Kavin and Team. All Rights Reserved.
+MIT License
 
-This project and all its source code, assets, trained models, and documentation
-are the intellectual property of Kavin and Team. No part of this project may be
-reproduced, distributed, modified, or used in any form without the express written
-permission of the owners.
+Copyright (c) 2026 Kavin and Team
 
-For licensing inquiries or collaboration, please open an issue or contact via GitHub.
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```
 
 ---
