@@ -74,6 +74,8 @@ last_detected_conf  = 0.0    # e.g. 0.87
 
 # Set True when WEIGHTNOW is sent; cleared once W: reply arrives
 weighnow_pending = False
+weighnow_time    = 0.0     # timestamp when WEIGHTNOW was sent (for timeout)
+WEIGHNOW_TIMEOUT = 10.0    # seconds — auto-clear if Arduino never replies
 # Info about the last scored event (for the UI)
 last_score_event = {"pts": 0, "cls": "-", "weight": 0.0, "base": 0, "mult": 1.0}
 
@@ -153,7 +155,10 @@ def pi_reader(sock):
                             weighnow_pending = False
                             print(f"[SCORE] Skipped — weight {diff_g:.1f}g < MIN ({MIN_WEIGHT}g)")
                     except ValueError:
-                        pass   # debug strings like ERR, baseline_reset, etc.
+                        # W:ERR, W:baseline, etc. — clear pending to avoid stale state
+                        if weighnow_pending:
+                            weighnow_pending = False
+                            print(f"[SCORE] Weight error from Arduino: {raw}")
     except Exception as e:
         print(f"[READER] {e}")
 
@@ -348,15 +353,32 @@ def video_feed_detected():
 
 @app.route("/cmd", methods=["POST"])
 def cmd():
-    global weighnow_pending
+    global weighnow_pending, weighnow_time
     data = request.get_json(silent=True)
     if not data or "cmd" not in data:
         return jsonify(ok=False, error="no cmd"), 400
     command = str(data["cmd"]).strip()
     if command == "WEIGHTNOW":
-        weighnow_pending = True   # arm the weight-triggered scorer
+        weighnow_pending = True
+        weighnow_time = time.time()
     ok, info = send_to_pi(command)
     return jsonify(ok=ok, info=info)
+
+@app.route("/simulate", methods=["POST"])
+def simulate():
+    """Test scoring without hardware.
+    POST /simulate {"cls": "Bottle", "weight": 50}
+    If cls is omitted, uses last_detected_class. If weight is omitted, uses 25g.
+    """
+    global last_detected_class, last_detected_conf
+    data = request.get_json(silent=True) or {}
+    cls = data.get("cls")
+    weight = float(data.get("weight", 25.0))
+    if cls:
+        last_detected_class = cls
+        last_detected_conf = 0.90
+    event = compute_combined_score(weight)
+    return jsonify(ok=True, event=event)
 
 @app.route("/score")
 def score():
