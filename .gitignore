@@ -31,3 +31,6 @@ docx_output.txt
 
 # Word documents
 *.docx
+
+# Docs folder (paper, plots — local only)
+docs/
