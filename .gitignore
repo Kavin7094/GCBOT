@@ -21,3 +21,10 @@ Thumbs.db
 
 # WhatsApp media (already referenced in README)
 WhatsApp Video*
+
+# Utility / temp scripts
+extract.py
+generate_plots.py
+gcbot_gemini_context.txt
+read_docx.py
+docx_output.txt

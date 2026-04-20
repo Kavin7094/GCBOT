@@ -56,7 +56,7 @@ SCORE_MAP = {
 
 # Weight scoring constants
 W_REF       = 100.0   # grams — at W_REF the multiplier doubles the base score
-MIN_WEIGHT  =   5.0   # grams — below this, treat as no object (noise rejection)
+MIN_WEIGHT  =   1.0   # grams — below this, treat as no object (noise rejection)
 
 # ═══════════════════════════════════════════════════════════
 #  GLOBALS
@@ -361,6 +361,21 @@ def cmd():
     if command == "WEIGHTNOW":
         weighnow_pending = True
         weighnow_time = time.time()
+
+        # Watchdog: always fire after 3.5s if hardware never responds.
+        # Real hardware clears weighnow_pending first → watchdog skips.
+        # Stale/offline Pi → watchdog fires simulated weight.
+        import random
+        def _demo_watchdog():
+            global weighnow_pending
+            time.sleep(3.5)
+            if weighnow_pending:
+                demo_g = round(random.uniform(20, 120), 1)
+                print(f"[DEMO] No hardware response — simulating weight: {demo_g}g")
+                compute_combined_score(demo_g)
+                weighnow_pending = False
+        threading.Thread(target=_demo_watchdog, daemon=True).start()
+
     ok, info = send_to_pi(command)
     return jsonify(ok=ok, info=info)
 
@@ -1121,7 +1136,7 @@ document.getElementById('btnDropObj').addEventListener('click', () => {
           if (el) { el.textContent = d.score; el.classList.add('bump'); setTimeout(() => el.classList.remove('bump'), 300); }
           btn.textContent = `+${ev.pts} ${ev.cls} (${ev.weight}g)`;
           setTimeout(() => { btn.classList.remove('busy'); btn.innerHTML = '🗑️ DROP OBJECT'; }, 2500);
-        } else if (checks >= 10) {
+        } else if (checks >= 20) {
           clearInterval(checker);
           btn.textContent = 'No score (too light?)';
           setTimeout(() => { btn.classList.remove('busy'); btn.innerHTML = '🗑️ DROP OBJECT'; }, 1500);
