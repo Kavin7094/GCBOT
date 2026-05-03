@@ -4,8 +4,13 @@ Merges streamrx.py (video + Roboflow inference) and laptop_control.py (Flask con
 into a single file with a modern dark UI.
 """
 
-from flask import Flask, Response, render_template_string, request, jsonify
-import socket, struct, threading, time, os
+from flask import Flask, Response, render_template_string, request, jsonify, session, redirect, url_for
+import socket, struct, threading, time, os, hashlib, uuid, json, io, base64
+from functools import wraps
+try:
+    import qrcode; HAS_QRCODE = True
+except ImportError:
+    HAS_QRCODE = False
 import cv2
 import numpy as np
 import torch
@@ -20,6 +25,11 @@ torch.set_num_threads(os.cpu_count() or 4)
 PI_IP        = "kavin.local"          # Raspberry Pi hostname / IP
 CONTROL_PORT = 5000
 VIDEO_PORT   = 9999
+
+# ── WiFi hotspot credentials (change to match your network/hotspot)
+WIFI_SSID     = "LAPTOP-OO8EF23U 3188"          # your network name
+WIFI_PASSWORD = "33333333"      # your network password
+WIFI_TYPE     = "WPA"            # WPA | WEP | nopass
 
 # Local YOLOv10 model
 _MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -62,11 +72,87 @@ MIN_WEIGHT  =   1.0   # grams — below this, treat as no object (noise rejectio
 #  GLOBALS
 # ═══════════════════════════════════════════════════════════
 app = Flask(__name__)
+app.secret_key = os.environ.get("GCBOT_SECRET", "gcbot-secret-2026")
+
+# ═══════════════════════════════════════════════════════════
+#  USER MANAGEMENT
+# ═══════════════════════════════════════════════════════════
+USERS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "users.json")
+_users_lock = threading.Lock()
+
+def load_users():
+    if not os.path.exists(USERS_FILE):
+        return []
+    with _users_lock:
+        try:
+            with open(USERS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return []
+
+def save_users(users):
+    with _users_lock:
+        with open(USERS_FILE, "w", encoding="utf-8") as f:
+            json.dump(users, f, indent=2, ensure_ascii=False)
+
+def hash_pw(pw):
+    return hashlib.sha256(pw.encode("utf-8")).hexdigest()
+
+def get_local_ip():
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]; s.close(); return ip
+    except Exception:
+        return "127.0.0.1"
+
+def get_subnet(ip: str) -> str:
+    """Return the /24 prefix, e.g. '10.107.83' for '10.107.83.5'."""
+    return ".".join(ip.split(".")[:3])
+
+def is_same_network(client_ip: str) -> bool:
+    """True when client is in the same /24 subnet as this machine."""
+    try:
+        server_ip = get_local_ip()
+        if client_ip in ("127.0.0.1", "::1", server_ip):
+            return True          # always allow localhost
+        return get_subnet(client_ip) == get_subnet(server_ip)
+    except Exception:
+        return True              # fail open
+
+def save_user_score(user_id, new_score):
+    users = load_users()
+    for u in users:
+        if u["id"] == user_id:
+            u["score"] = new_score; break
+    save_users(users)
+
+# ── Network guard: redirect off-network clients to WiFi connect page
+NETWORK_EXEMPT = {"/qr", "/qr_img", "/wifi_qr_img", "/wrong_network",
+                  "/video_feed", "/video_feed_detected"}
+
+@app.before_request
+def check_network():
+    if request.path in NETWORK_EXEMPT:
+        return None
+    client_ip = request.remote_addr or ""
+    if not is_same_network(client_ip):
+        return redirect(url_for("wrong_network"))
+
+
+def login_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if "user_id" not in session:
+            return redirect(url_for("login"))
+        return f(*args, **kwargs)
+    return decorated
 
 latest_frame   = None
 detected_frame = None
 running        = True
 latest_score   = 0
+active_user_id = None   # set on login; used to persist cumulative score
 
 # Last detection snapshot (updated every inference frame)
 last_detected_class = None   # e.g. "Bottle"
@@ -112,6 +198,8 @@ def compute_combined_score(weight_g: float) -> dict:
     mult  = round(1.0 + weight_g / W_REF, 2)
     pts   = round(base * mult)
     latest_score += pts
+    if active_user_id:
+        save_user_score(active_user_id, latest_score)
 
     event = {"pts": pts, "cls": cls, "weight": round(weight_g, 1),
              "base": base, "mult": mult, "conf": round(conf, 2),
@@ -1286,12 +1374,404 @@ pollScore();
 """
 
 @app.route("/")
+@login_required
 def index():
-    return render_template_string(HTML)
+    return render_template_string(HTML,
+        nickname=session.get("nickname", ""),
+        avatar=session.get("avatar", "🤖"))
+
+# ═══════════════════════════════════════════════════════════
+#  AUTH HTML TEMPLATES
+# ═══════════════════════════════════════════════════════════
+_BASE_CSS = """
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{--bg:#0b0e14;--glass:rgba(255,255,255,0.06);--border:rgba(255,255,255,0.10);
+--text:#e2e8f0;--muted:#94a3b8;--accent:#6366f1;--ag:linear-gradient(135deg,#6366f1,#a78bfa);
+--green:#22c55e;--red:#ef4444}
+body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--text);
+min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px;
+background-image:radial-gradient(ellipse at 20% 50%,rgba(99,102,241,.08) 0%,transparent 60%),
+radial-gradient(ellipse at 80% 20%,rgba(167,139,250,.06) 0%,transparent 50%)}
+.card{background:var(--glass);border:1px solid var(--border);border-radius:20px;
+padding:38px 34px;width:100%;max-width:420px;backdrop-filter:blur(20px)}
+.logo{text-align:center;margin-bottom:26px}
+.logo-icon{font-size:2.4rem}
+.logo h1{font-size:1.45rem;font-weight:800;background:var(--ag);
+-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-top:6px}
+.logo p{font-size:.78rem;color:var(--muted);margin-top:3px}
+.field{margin-bottom:14px}
+.field label{display:block;font-size:.7rem;font-weight:600;color:var(--muted);
+margin-bottom:5px;text-transform:uppercase;letter-spacing:.06em}
+.field input{width:100%;background:rgba(255,255,255,.04);border:1px solid var(--border);
+border-radius:10px;padding:11px 13px;color:var(--text);font-size:.88rem;
+font-family:inherit;outline:none;transition:border-color .2s}
+.field input:focus{border-color:var(--accent)}
+.btn{width:100%;padding:12px;border-radius:10px;border:none;background:var(--ag);
+color:#fff;font-size:.93rem;font-weight:700;font-family:inherit;cursor:pointer;
+transition:opacity .2s,transform .1s;margin-top:6px}
+.btn:hover{opacity:.9}.btn:active{transform:scale(.98)}
+.link-row{text-align:center;margin-top:18px;font-size:.8rem;color:var(--muted)}
+.link-row a{color:#a78bfa;text-decoration:none;font-weight:600}
+.error{background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);
+border-radius:8px;padding:10px 14px;font-size:.8rem;color:#fca5a5;margin-bottom:14px}
+</style>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
+"""
+
+LOGIN_HTML = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GCBOT – Sign In</title>""" + _BASE_CSS + """</head><body>
+<div class="card">
+  <div class="logo"><div class="logo-icon">🤖</div>
+    <h1>GCBOT Control</h1><p>Sign in to start playing</p></div>
+  {% if error %}<div class="error">{{ error }}</div>{% endif %}
+  <form method="POST">
+    <div class="field"><label>Email</label>
+      <input type="email" name="email" placeholder="you@example.com" required autofocus></div>
+    <div class="field"><label>Password</label>
+      <input type="password" name="password" placeholder="••••••••" required></div>
+    <button class="btn">Sign In →</button>
+  </form>
+  <div class="link-row">New player? <a href="/register">Create account</a></div>
+  <div style="text-align:center;margin-top:10px;font-size:.75rem">
+    <a href="/leaderboard" style="color:var(--muted);text-decoration:none">🏆 View Leaderboard</a>
+  </div>
+</div></body></html>"""
+
+REGISTER_HTML = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GCBOT – Register</title>""" + _BASE_CSS + """
+<style>
+.card{max-width:500px}
+.row2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.avatar-grid{display:flex;flex-wrap:wrap;gap:7px;margin-top:6px}
+.av-in{display:none}
+.av-in+label{font-size:1.5rem;width:42px;height:42px;display:flex;align-items:center;
+justify-content:center;border-radius:10px;border:2px solid transparent;
+background:rgba(255,255,255,.05);cursor:pointer;transition:.15s}
+.av-in:checked+label{border-color:var(--accent);background:rgba(99,102,241,.15);transform:scale(1.1)}
+.av-in+label:hover{border-color:rgba(99,102,241,.5)}
+</style>
+</head><body>
+<div class="card">
+  <div class="logo"><div class="logo-icon">🎮</div>
+    <h1>Create Profile</h1><p>Join GCBOT and collect some trash!</p></div>
+  {% if error %}<div class="error">{{ error }}</div>{% endif %}
+  <form method="POST">
+    <div class="row2">
+      <div class="field"><label>Full Name</label>
+        <input type="text" name="name" placeholder="Kavin" required autofocus></div>
+      <div class="field"><label>Nickname <span style="color:#a78bfa;font-size:.65rem">★ leaderboard</span></label>
+        <input type="text" name="nickname" placeholder="GCBot_King" required maxlength="20"></div>
+    </div>
+    <div class="field"><label>Choose Avatar</label>
+      <div class="avatar-grid">
+        {% for av in ["🤖","🦾","🎮","🏆","⚡","🔥","💎","🎯","🚀","🌊","🦁","🐉","🦅","🌈","👾"] %}
+        <input class="av-in" type="radio" name="avatar" id="av{{loop.index}}" value="{{av}}"
+          {{"checked" if loop.first else ""}}>
+        <label for="av{{loop.index}}">{{av}}</label>
+        {% endfor %}
+      </div>
+    </div>
+    <div class="field"><label>Email</label>
+      <input type="email" name="email" placeholder="you@example.com" required></div>
+    <div class="row2">
+      <div class="field"><label>Password</label>
+        <input type="password" name="password" placeholder="Min 4 chars" required minlength="4"></div>
+      <div class="field"><label>Confirm</label>
+        <input type="password" name="confirm" placeholder="••••••••" required></div>
+    </div>
+    <button class="btn">Create Account 🚀</button>
+  </form>
+  <div class="link-row">Already have an account? <a href="/login">Sign in</a></div>
+</div></body></html>"""
+
+QR_HTML = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GCBOT – Scan to Play</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700;800&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Inter',sans-serif;background:#0b0e14;color:#e2e8f0;
+min-height:100vh;display:flex;flex-direction:column;align-items:center;
+justify-content:center;gap:20px;padding:30px;
+background-image:radial-gradient(ellipse at 50% 0%,rgba(99,102,241,.15) 0%,transparent 60%)}
+.title{font-size:.9rem;font-weight:700;text-transform:uppercase;letter-spacing:.15em;color:#94a3b8}
+.brand{font-size:2.5rem;font-weight:800;
+background:linear-gradient(135deg,#6366f1,#a78bfa);
+-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.qr-row{display:flex;gap:32px;align-items:flex-start;justify-content:center;flex-wrap:wrap}
+.qr-card{display:flex;flex-direction:column;align-items:center;gap:12px}
+.qr-label{font-size:.75rem;font-weight:700;text-transform:uppercase;
+letter-spacing:.1em;color:#94a3b8}
+.step{font-size:1.4rem;font-weight:800;color:#6366f1}
+.qr-frame{background:white;border-radius:16px;padding:14px;
+box-shadow:0 0 50px rgba(99,102,241,.3)}
+.qr-frame img{display:block;border-radius:6px}
+.qr-sub{font-size:.72rem;color:#64748b;text-align:center;max-width:160px;line-height:1.4}
+.divider{width:1px;background:rgba(255,255,255,.08);align-self:stretch}
+.url{font-size:.9rem;font-weight:600;color:#a78bfa;
+background:rgba(99,102,241,.1);border:1px solid rgba(99,102,241,.2);
+border-radius:10px;padding:8px 20px}
+.hint{font-size:.75rem;color:#64748b}
+</style>
+</head><body>
+<div class="title">Scan to Play</div>
+<div class="brand">🤖 GCBOT</div>
+<div class="qr-row">
+  <!-- Step 1: WiFi -->
+  <div class="qr-card">
+    <div class="step">Step 1</div>
+    <div class="qr-label">📶 Join WiFi</div>
+    <div class="qr-frame"><img src="/wifi_qr_img" width="180" height="180" alt="WiFi QR"></div>
+    <div class="qr-sub">Scan to connect to <strong style="color:#e2e8f0">{{ ssid }}</strong> network</div>
+  </div>
+  <div class="divider"></div>
+  <!-- Step 2: Login -->
+  <div class="qr-card">
+    <div class="step">Step 2</div>
+    <div class="qr-label">🎮 Open Game</div>
+    <div class="qr-frame"><img src="/qr_img" width="180" height="180" alt="Login QR"></div>
+    <div class="qr-sub">Scan to open the control page</div>
+  </div>
+</div>
+<div class="url">{{ url }}</div>
+<div class="hint">First join the WiFi, then scan the second code to play</div>
+</body></html>"""
+
+WRONG_NETWORK_HTML = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GCBOT – Wrong Network</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700;800&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Inter',sans-serif;background:#0b0e14;color:#e2e8f0;
+min-height:100vh;display:flex;flex-direction:column;align-items:center;
+justify-content:center;text-align:center;gap:20px;padding:24px;
+background-image:radial-gradient(ellipse at 50% 30%,rgba(239,68,68,.1) 0%,transparent 60%)}
+.icon{font-size:3.5rem}
+h1{font-size:1.6rem;font-weight:800;
+background:linear-gradient(135deg,#f87171,#fca5a5);
+-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+p{color:#94a3b8;font-size:.88rem;max-width:320px;line-height:1.6}
+.ssid-box{background:rgba(99,102,241,.1);border:1px solid rgba(99,102,241,.25);
+border-radius:12px;padding:14px 28px}
+.ssid{font-size:1.2rem;font-weight:800;color:#a78bfa}
+.pw{font-size:.8rem;color:#94a3b8;margin-top:4px}
+.qr-frame{background:white;border-radius:16px;padding:12px;
+box-shadow:0 0 40px rgba(239,68,68,.2);display:inline-block}
+.retry{display:inline-block;margin-top:8px;padding:10px 28px;
+border-radius:10px;background:linear-gradient(135deg,#6366f1,#a78bfa);
+color:#fff;font-weight:700;font-size:.88rem;text-decoration:none}
+</style>
+</head><body>
+<div class="icon">📵</div>
+<h1>Wrong Network</h1>
+<p>Your device is not connected to the GCBOT network.<br>
+Please connect first, then try again.</p>
+<div class="ssid-box">
+  <div class="ssid">📡 {{ ssid }}</div>
+  <div class="pw">Password: <strong style="color:#e2e8f0">{{ password }}</strong></div>
+</div>
+<div class="qr-frame">
+  <img src="/wifi_qr_img" width="180" height="180" alt="WiFi QR Code">
+</div>
+<p style="font-size:.75rem">Scan above to connect automatically</p>
+<a href="/login" class="retry">I'm connected → Try Again</a>
+</body></html>"""
+
+LEADERBOARD_HTML = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GCBOT – Leaderboard</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Inter',sans-serif;background:#0b0e14;color:#e2e8f0;
+min-height:100vh;padding:30px 16px;
+background-image:radial-gradient(ellipse at 50% 0%,rgba(99,102,241,.1) 0%,transparent 60%)}
+.header{text-align:center;margin-bottom:32px}
+.header h1{font-size:2rem;font-weight:800;
+background:linear-gradient(135deg,#f59e0b,#fbbf24);
+-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.header p{color:#94a3b8;font-size:.85rem;margin-top:6px}
+.table-wrap{max-width:600px;margin:0 auto}
+.row{display:flex;align-items:center;gap:14px;
+background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);
+border-radius:14px;padding:14px 18px;margin-bottom:10px;transition:.2s}
+.row:hover{background:rgba(255,255,255,.07)}
+.rank{font-size:1.3rem;font-weight:800;width:36px;text-align:center;flex-shrink:0}
+.rank.r1{color:#f59e0b}.rank.r2{color:#94a3b8}.rank.r3{color:#cd7c3e}
+.av{font-size:1.6rem;flex-shrink:0}
+.info{flex:1;min-width:0}
+.nick{font-weight:700;font-size:.95rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.name{font-size:.72rem;color:#94a3b8;margin-top:2px}
+.score{font-size:1.3rem;font-weight:800;
+background:linear-gradient(135deg,#22c55e,#86efac);
+-webkit-background-clip:text;-webkit-text-fill-color:transparent;flex-shrink:0}
+.you-badge{font-size:.6rem;font-weight:700;background:#6366f1;color:#fff;
+border-radius:6px;padding:2px 6px;margin-left:6px;vertical-align:middle}
+.empty{text-align:center;padding:40px;color:#94a3b8;font-size:.9rem}
+.back-btn{display:block;text-align:center;margin:24px auto 0;max-width:200px;
+padding:12px;border-radius:12px;background:linear-gradient(135deg,#6366f1,#a78bfa);
+color:#fff;font-weight:700;font-size:.9rem;text-decoration:none;
+font-family:inherit;border:none;cursor:pointer;transition:opacity .2s}
+.back-btn:hover{opacity:.85}
+</style>
+</head><body>
+<div class="header">
+  <h1>🏆 Leaderboard</h1>
+  <p>Top GCBOT Trash Collectors</p>
+</div>
+<div class="table-wrap">
+  {% if users %}
+    {% for u in users %}
+    <div class="row">
+      <div class="rank {{'r1' if loop.index==1 else 'r2' if loop.index==2 else 'r3' if loop.index==3 else ''}}">
+        {{'🥇' if loop.index==1 else '🥈' if loop.index==2 else '🥉' if loop.index==3 else loop.index}}
+      </div>
+      <div class="av">{{ u.avatar }}</div>
+      <div class="info">
+        <div class="nick">{{ u.nickname }}
+          {% if u.nickname == current_nick %}<span class="you-badge">YOU</span>{% endif %}
+        </div>
+        <div class="name">{{ u.name }}</div>
+      </div>
+      <div class="score">{{ u.score }} pts</div>
+    </div>
+    {% endfor %}
+  {% else %}
+    <div class="empty">No players yet — be the first to register! 🚀</div>
+  {% endif %}
+  <a href="/" class="back-btn">← Back to Control</a>
+</div>
+</body></html>"""
+
+# ═══════════════════════════════════════════════════════════
+#  AUTH ROUTES
+# ═══════════════════════════════════════════════════════════
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    global latest_score, active_user_id
+    if "user_id" in session:
+        return redirect(url_for("index"))
+    error = None
+    if request.method == "POST":
+        email = request.form.get("email", "").strip().lower()
+        pw    = request.form.get("password", "")
+        users = load_users()
+        user  = next((u for u in users
+                      if u["email"].lower() == email and u["password"] == hash_pw(pw)), None)
+        if user:
+            session["user_id"]  = user["id"]
+            session["nickname"] = user["nickname"]
+            session["avatar"]   = user["avatar"]
+            active_user_id = user["id"]
+            latest_score   = user.get("score", 0)
+            return redirect(url_for("index"))
+        error = "Invalid email or password"
+    return render_template_string(LOGIN_HTML, error=error)
+
+@app.route("/register", methods=["GET", "POST"])
+def register():
+    global latest_score, active_user_id
+    if "user_id" in session:
+        return redirect(url_for("index"))
+    error = None
+    if request.method == "POST":
+        name     = request.form.get("name", "").strip()
+        nickname = request.form.get("nickname", "").strip()
+        avatar   = request.form.get("avatar", "🤖")
+        email    = request.form.get("email", "").strip().lower()
+        pw       = request.form.get("password", "")
+        confirm  = request.form.get("confirm", "")
+        if not all([name, nickname, email, pw]):
+            error = "All fields are required"
+        elif pw != confirm:
+            error = "Passwords do not match"
+        elif len(pw) < 4:
+            error = "Password must be at least 4 characters"
+        else:
+            users = load_users()
+            if any(u["email"].lower() == email for u in users):
+                error = "Email already registered"
+            elif any(u["nickname"].lower() == nickname.lower() for u in users):
+                error = "Nickname already taken — try another"
+            else:
+                new_user = {
+                    "id":         str(uuid.uuid4()),
+                    "name":       name,
+                    "nickname":   nickname,
+                    "avatar":     avatar,
+                    "email":      email,
+                    "password":   hash_pw(pw),
+                    "score":      0,
+                    "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                }
+                users.append(new_user)
+                save_users(users)
+                session["user_id"]  = new_user["id"]
+                session["nickname"] = new_user["nickname"]
+                session["avatar"]   = new_user["avatar"]
+                active_user_id = new_user["id"]
+                latest_score   = 0
+                return redirect(url_for("index"))
+    return render_template_string(REGISTER_HTML, error=error)
+
+@app.route("/logout")
+def logout():
+    global active_user_id
+    session.clear()
+    active_user_id = None
+    return redirect(url_for("login"))
+
+@app.route("/qr")
+def qr_display():
+    ip  = get_local_ip()
+    url = f"http://{ip}:5001/login"
+    return render_template_string(QR_HTML, ip=ip, url=url, ssid=WIFI_SSID)
+
+@app.route("/wifi_qr_img")
+def wifi_qr_img():
+    """QR code encoding WiFi credentials — phone scans and auto-joins network."""
+    wifi_str = f"WIFI:T:{WIFI_TYPE};S:{WIFI_SSID};P:{WIFI_PASSWORD};;"
+    if HAS_QRCODE:
+        img = qrcode.make(wifi_str)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return Response(buf.getvalue(), mimetype="image/png")
+    return Response("Install qrcode: pip install qrcode[pil]", mimetype="text/plain")
+
+@app.route("/wrong_network")
+def wrong_network():
+    return render_template_string(WRONG_NETWORK_HTML,
+        ssid=WIFI_SSID, password=WIFI_PASSWORD), 403
+
+@app.route("/qr_img")
+def qr_img():
+    ip  = get_local_ip()
+    url = f"http://{ip}:5001/login"
+    if HAS_QRCODE:
+        img = qrcode.make(url)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return Response(buf.getvalue(), mimetype="image/png")
+    return Response(f"Install qrcode: pip install qrcode[pil]\nURL: {url}",
+                    mimetype="text/plain")
+
+@app.route("/leaderboard")
+def leaderboard():
+    users = load_users()
+    users_sorted = sorted(users, key=lambda u: u.get("score", 0), reverse=True)
+    return render_template_string(LEADERBOARD_HTML,
+        users=users_sorted,
+        current_nick=session.get("nickname", ""))
 
 # ═══════════════════════════════════════════════════════════
 #  ENTRY POINT
 # ═══════════════════════════════════════════════════════════
 if __name__ == "__main__":
     print("\n✦  GCBOT Control running → http://localhost:5001\n")
+    print(f"   QR Display page  → http://localhost:5001/qr\n")
     app.run(host="0.0.0.0", port=5001, debug=False, threaded=True)
+

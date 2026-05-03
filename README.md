@@ -18,7 +18,7 @@
 ## 📖 Table of Contents
 
 - [Overview](#-overview)
-- [Demo](#-demo)
+- [Screenshots](#-screenshots)
 - [Architecture](#-system-architecture)
 - [Features](#-features)
 - [Hardware](#-hardware)
@@ -45,28 +45,46 @@
 - 🏆 **Combined AI + Weight scoring** — points are based on both what the AI detected AND how heavy the object is
 - ⚖️ **HX711 load cell** measures object weight for score multiplier
 - 🌐 **A browser-based control panel** accessible from any device on the network
+- 🔐 **Login & player system** — sign in or create an account before controlling the robot
+- 📲 **QR onboarding page** — scan to join Wi-Fi, scan again to open the game instantly
 
 The entire system communicates over TCP sockets — the laptop runs the Flask web server, AI inference, and score computation; the Raspberry Pi acts as a bridge between the laptop and the Arduino; and the Arduino directly controls all motors, servos, and the load cell.
 
 ---
 
-## 🎬 Demo
+## 📸 Screenshots
 
-### 🖥️ Web Control Interface (Desktop)
+### 🔐 Login Page
 
-> The full-screen landscape control panel with live AI Detection feed, movement D-pad, gripper & arm controls, and the real-time score badge.
+> Players sign in or create an account before accessing the robot controls. The glassmorphism login card sits on the animated dark background.
 
-![GCBOT Desktop Control UI](Screenshot%202026-03-26%20213021.png)
+![GCBOT Login UI](screenshots/gcbot_login_ui.png)
 
 ---
 
-### 📱 Mobile Interface — Landscape Mode
+### 📲 QR Onboarding Page (`/qr`)
 
-> The interface automatically adapts to mobile landscape mode. All controls are touch-optimized and response is near-instant thanks to TCP_NODELAY.
+> Displayed on a screen at the competition venue. Players scan **Step 1** to join the Wi-Fi hotspot, then scan **Step 2** to instantly open the control page — no typing required.
 
-| Mobile View (Portrait) | Mobile Landscape with Feed |
+![GCBOT QR Page](screenshots/gcbot_qr_page.png)
+
+---
+
+### 📱 Mobile Views
+
+> The interface is fully responsive. On portrait mobile it prompts rotation; on landscape it shows the full control panel.
+
+| Portrait (Login) | Landscape |
 |:---:|:---:|
-| ![Mobile Portrait](WhatsApp%20Image%202026-03-17%20at%208.20.31%20PM.jpeg) | ![Mobile Landscape](WhatsApp%20Image%202026-03-26%20at%206.47.48%20PM.jpeg) |
+| ![Mobile Portrait](screenshots/gcbot_mobile_portrait.png) | ![Mobile Landscape](screenshots/gcbot_mobile_landscape.png) |
+
+---
+
+### 🏆 Score Chart API (`/scorechart`)
+
+> The `/scorechart` endpoint returns the full scoring classification as JSON — all 18 waste classes with their base points, `W_REF`, and `MIN_WEIGHT` values.
+
+![GCBOT Score Chart API](screenshots/gcbot_scorechart_api.png)
 
 ---
 
