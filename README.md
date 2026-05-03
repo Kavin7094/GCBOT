@@ -80,11 +80,11 @@ The entire system communicates over TCP sockets — the laptop runs the Flask we
 
 ---
 
-### 🏆 Score Chart API (`/scorechart`)
+### 🆕 Create Account Page
 
-> The `/scorechart` endpoint returns the full scoring classification as JSON — all 18 waste classes with their base points, `W_REF`, and `MIN_WEIGHT` values.
+> New players fill in their Full Name, Nickname (shown on leaderboard), choose an avatar, and set a password. The profile is saved and they are logged in immediately.
 
-![GCBOT Score Chart API](screenshots/gcbot_scorechart_api.png)
+![GCBOT Create Account](screenshots/gcbot_create_account.png)
 
 ---
 
