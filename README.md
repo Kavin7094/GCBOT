@@ -88,6 +88,22 @@ The entire system communicates over TCP sockets — the laptop runs the Flask we
 
 ---
 
+### 🏆 Leaderboard Page
+
+> Shows all players ranked by total score. Each entry displays the player's avatar, nickname, full name, and points earned in the session.
+
+![GCBOT Leaderboard](screenshots/gcbot_leaderboard.png)
+
+---
+
+### 🖥️ Web Control Interface (Desktop)
+
+> The full-screen landscape control panel with live AI Detection feed, movement D-pad, gripper & arm controls, and the real-time score badge.
+
+![GCBOT Desktop Control UI](Screenshot%202026-03-26%20213021.png)
+
+---
+
 ## 🏗️ System Architecture
 
 ```
