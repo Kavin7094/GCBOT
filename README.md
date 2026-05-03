@@ -129,6 +129,53 @@ The entire system communicates over TCP sockets — the laptop runs the Flask we
 └──────────────────────────────────────────────────────────────────┘
 ```
 
+### Three-Tier Architecture Diagram
+
+```mermaid
+graph TD
+    %% Define Node Styles
+    classDef component fill:#ffffff,stroke:#333333,stroke-width:1px;
+
+    subgraph Tier3 ["Tier 3: Host / Fog Layer"]
+        Browser[("Web Browser (Mobile/PC)\nControl UI & Video")]:::component
+        Flask["Flask Web Server"]:::component
+        YOLO["YOLOv10 Inference Engine"]:::component
+
+        Browser <==>|HTTP / WebSocket| Flask
+        Flask <==>|Frames / Classes| YOLO
+    end
+    style Tier3 fill:#e3f2fd,stroke:#1565c0,stroke-width:2px;
+
+    subgraph Tier2 ["Tier 2: Edge Layer"]
+        Pi["Raspberry Pi 4"]:::component
+        Cam[("USB Web Camera")]:::component
+
+        Cam -->|Raw Video| Pi
+    end
+    style Tier2 fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px;
+
+    subgraph Tier1 ["Tier 1: Hardware Layer"]
+        Arduino["Arduino Uno"]:::component
+        L298N["L298N Motor Driver"]:::component
+        Motors(("4x DC Motors")):::component
+        Servos(("4x Servo Motors\n(Arm & Gripper)")):::component
+        HX711["HX711 Amplifier"]:::component
+        LoadCell[("1Kg Load Cell")]:::component
+
+        Arduino -->|PWM Signals| L298N
+        L298N -->|Power| Motors
+        Arduino -->|PWM Signals| Servos
+        HX711 -->|Digital Weight Data| Arduino
+        LoadCell -->|Analog Signal| HX711
+    end
+    style Tier1 fill:#fff3e0,stroke:#e65100,stroke-width:2px;
+
+    %% Cross-layer connections
+    Flask ==>|TCP Control Commands| Pi
+    Pi ==>|MJPEG Video Stream| Flask
+    Pi <==>|Serial USB| Arduino
+```
+
 ### Communication Flow
 
 ```mermaid
