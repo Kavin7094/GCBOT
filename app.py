@@ -27,8 +27,8 @@ CONTROL_PORT = 5000
 VIDEO_PORT   = 9999
 
 # ── WiFi hotspot credentials (change to match your network/hotspot)
-WIFI_SSID     = "LAPTOP-OO8EF23U 3188"          # your network name
-WIFI_PASSWORD = "33333333"      # your network password
+WIFI_SSID     = "🚶‍♂️"          # your network name
+WIFI_PASSWORD = "111111111"      # your network password
 WIFI_TYPE     = "WPA"            # WPA | WEP | nopass
 
 # Local YOLOv10 model

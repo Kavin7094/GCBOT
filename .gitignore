@@ -34,3 +34,6 @@ docx_output.txt
 
 # Docs folder (paper, plots — local only)
 docs/
+
+# User data — contains hashed passwords, never commit
+users.json
